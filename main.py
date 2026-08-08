@@ -13,11 +13,12 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 EMA_PERIOD = 288
 RSI_PERIOD = 14
-PROXIMITY_PRIMARY_PCT = 0.5   # Entry zone (<= 0.5% or crossed)
+PROXIMITY_PRIMARY_PCT = 0.5    # Entry zone (<= 0.5% or crossed)
 PROXIMITY_WATCHLIST_MIN = 0.51 # Near-miss zone start
 PROXIMITY_WATCHLIST_MAX = 1.50 # Near-miss zone end
 DIV_LOOKBACK_MIN = 15
 DIV_LOOKBACK_MAX = 30
+HEARTBEAT_INTERVAL = 7200      # 2 Hours in seconds
 
 COINDCX_PUBLIC_API = "https://public.coindcx.com"
 COINDCX_TICKER_API = "https://api.coindcx.com/exchange/ticker"
@@ -25,7 +26,7 @@ COINDCX_TICKER_API = "https://api.coindcx.com/exchange/ticker"
 # Flask Web Server for Render & Ping/Test Routes
 app = Flask(__name__)
 
-# Track global metrics for Heartbeat reports
+# Track global metrics for status & Heartbeat reports
 last_scan_time = "Not started"
 last_markets_count = 0
 last_scan_duration = 0
@@ -127,14 +128,15 @@ def fetch_candles(pair: str, interval: str, limit: int = 350) -> pd.DataFrame:
 # ==========================================
 # SCANNER CORE LOGIC
 # ==========================================
-def process_market(pair: str):
+def process_market(pair: str, is_diagnostic: bool = False) -> dict:
+    """Evaluates a market pair and returns result status."""
     global watchlist_tokens
 
     df_1h = fetch_candles(pair, interval="1h")
     df_30m = fetch_candles(pair, interval="30m")
 
     if df_1h.empty or len(df_1h) < 290 or df_30m.empty or len(df_30m) < 290:
-        return
+        return {"status": "skipped"}
 
     df_1h['ema288'] = df_1h['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
     df_1h['rsi'] = calculate_rsi(df_1h['close'], period=RSI_PERIOD)
@@ -149,100 +151,116 @@ def process_market(pair: str):
     # ------------------------------------
     # BEARISH SETUP EVALUATION
     # ------------------------------------
-    if ema_30m >= (ema_1h * 0.9992):  # 30m EMA filter
+    if ema_30m >= (ema_1h * 0.9992):
         if check_bearish_divergence(df_1h):
-            # Primary Instant Alert Zone (<= 0.5% proximity or crossed above)
             if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price >= ema_1h:
-                msg = (
-                    f"🔴 *PRIMARY BEARISH ALERT: {pair}*\n\n"
-                    f"• *Live Price:* {live_price}\n"
-                    f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
-                    f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
-                    f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
-                    f"• *Signal:* Bearish RSI Divergence (15–30 candles) active near 1H EMA!"
-                )
-                send_telegram_alert(msg)
+                if not is_diagnostic:
+                    msg = (
+                        f"🔴 *PRIMARY BEARISH ALERT: {pair}*\n\n"
+                        f"• *Live Price:* {live_price}\n"
+                        f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
+                        f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
+                        f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
+                        f"• *Signal:* Bearish RSI Divergence (15–30 candles) active near 1H EMA!"
+                    )
+                    send_telegram_alert(msg)
+                return {"status": "primary_alert", "pair": pair, "type": "🔴 Bearish", "price": live_price, "ema_1h": round(ema_1h, 4), "dist": round(dist_pct, 2)}
 
-            # Near-Miss Watchlist Zone (0.51% to 1.50%)
             elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
-                watchlist_tokens.append({
+                token_info = {
                     "pair": pair,
                     "type": "🔴 Bearish",
                     "price": live_price,
                     "ema_1h": round(ema_1h, 4),
                     "dist": round(dist_pct, 2)
-                })
+                }
+                if not is_diagnostic:
+                    watchlist_tokens.append(token_info)
+                return {"status": "near_miss", "info": token_info}
 
     # ------------------------------------
     # BULLISH SETUP EVALUATION
     # ------------------------------------
-    if ema_30m <= (ema_1h * 1.0008):  # 30m EMA filter
+    if ema_30m <= (ema_1h * 1.0008):
         if check_bullish_divergence(df_1h):
-            # Primary Instant Alert Zone (<= 0.5% proximity or crossed below)
             if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price <= ema_1h:
-                msg = (
-                    f"🟢 *PRIMARY BULLISH ALERT: {pair}*\n\n"
-                    f"• *Live Price:* {live_price}\n"
-                    f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
-                    f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
-                    f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
-                    f"• *Signal:* Bullish RSI Divergence (15–30 candles) active near 1H EMA!"
-                )
-                send_telegram_alert(msg)
+                if not is_diagnostic:
+                    msg = (
+                        f"🟢 *PRIMARY BULLISH ALERT: {pair}*\n\n"
+                        f"• *Live Price:* {live_price}\n"
+                        f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
+                        f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
+                        f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
+                        f"• *Signal:* Bullish RSI Divergence (15–30 candles) active near 1H EMA!"
+                    )
+                    send_telegram_alert(msg)
+                return {"status": "primary_alert", "pair": pair, "type": "🟢 Bullish", "price": live_price, "ema_1h": round(ema_1h, 4), "dist": round(dist_pct, 2)}
 
-            # Near-Miss Watchlist Zone (0.51% to 1.50%)
             elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
-                watchlist_tokens.append({
+                token_info = {
                     "pair": pair,
                     "type": "🟢 Bullish",
                     "price": live_price,
                     "ema_1h": round(ema_1h, 4),
                     "dist": round(dist_pct, 2)
-                })
+                }
+                if not is_diagnostic:
+                    watchlist_tokens.append(token_info)
+                return {"status": "near_miss", "info": token_info}
+
+    return {"status": "normal"}
 
 # ==========================================
-# DIAGNOSTIC TEST RUNNER (TRIGGERED VIA URL)
+# DIAGNOSTIC MANUAL TEST RUNNER (VIA /test URL)
 # ==========================================
 def run_diagnostic_test():
-    """Triggered instantly when visiting the /test URL link."""
-    df_1h = fetch_candles("B-BTC_USDT", "1h")
-    df_30m = fetch_candles("B-BTC_USDT", "30m")
+    """Runs a manual scan pass and delivers detailed summary metrics to Telegram."""
+    start_time = time.time()
+    markets = get_all_pairs()
+    total_scanned = len(markets)
+    primary_alerts_found = 0
+    near_miss_list = []
 
-    if not df_1h.empty and not df_30m.empty:
-        df_1h['ema288'] = df_1h['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
-        df_1h['rsi'] = calculate_rsi(df_1h['close'], period=RSI_PERIOD)
-        df_30m['ema288'] = df_30m['close'].ewm(span=EMA_PERIOD, adjust=False).mean()
+    for pair in markets:
+        res = process_market(pair, is_diagnostic=True)
+        if res["status"] == "primary_alert":
+            primary_alerts_found += 1
+        elif res["status"] == "near_miss":
+            near_miss_list.append(res["info"])
+        time.sleep(0.05)
 
-        price = df_1h.iloc[-1]['close']
-        ema_1h = df_1h.iloc[-1]['ema288']
-        ema_30m = df_30m.iloc[-1]['ema288']
-        rsi_val = df_1h.iloc[-1]['rsi']
-        dist_pct = abs(price - ema_1h) / ema_1h * 100
+    duration = time.time() - start_time
+    time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
 
-        msg = (
-            f"🧪 *MANUAL DIAGNOSTIC TEST REPORT*\n"
-            f"------------------------------------\n"
-            f"• *Status:* 🟢 Bot Healthy & Scanning 24/7\n"
-            f"• *Markets Monitored:* {last_markets_count} CoinDCX Pairs\n"
-            f"• *Last Scan Time:* {last_scan_time}\n\n"
-            f"*Sample Snapshot (BTC/USDT):*\n"
-            f"• Live Price: ${price}\n"
-            f"• 1H 288 EMA: ${round(ema_1h, 2)}\n"
-            f"• 30M 288 EMA: ${round(ema_30m, 2)}\n"
-            f"• Distance to EMA: {round(dist_pct, 2)}%\n"
-            f"• Current 1H RSI: {round(rsi_val, 1)}\n\n"
-            f"✅ *All API connections & Telegram Webhooks are fully working!*"
-        )
-        send_telegram_alert(msg)
+    msg_lines = [
+        "🧪 *MANUAL DIAGNOSTIC SCAN REPORT*",
+        "------------------------------------",
+        f"• *System Health:* 🟢 Alive & Operational",
+        f"• *Total Markets Scanned:* {total_scanned}",
+        f"• *Primary Alerts Active:* {primary_alerts_found}",
+        f"• *Near-Miss Tokens Found:* {len(near_miss_list)}",
+        f"• *Scan Duration:* {round(duration, 1)}s",
+        f"• *Timestamp:* {time_str}"
+    ]
+
+    if near_miss_list:
+        msg_lines.append("\n👀 *NEAR-MISS WATCHLIST (0.51% - 1.50%)*")
+        msg_lines.append("------------------------------------")
+        for t in near_miss_list:
+            msg_lines.append(f"• {t['type']} *{t['pair']}* | Dist: {t['dist']}% | Price: {t['price']}")
+    else:
+        msg_lines.append("\n• _No tokens currently sitting in the 0.51%-1.50% near-miss zone._")
+
+    send_telegram_alert("\n".join(msg_lines))
 
 # ==========================================
-# 4-HOUR HEARTBEAT & WATCHLIST COMPILER
+# 2-HOUR HEARTBEAT & WATCHLIST COMPILER
 # ==========================================
-def send_4hour_heartbeat():
+def send_2hour_heartbeat():
     global watchlist_tokens
     
     msg_lines = [
-        "💓 *4-HOUR SYSTEM HEARTBEAT & WATCHLIST*",
+        "💓 *2-HOUR SYSTEM HEARTBEAT & WATCHLIST*",
         "------------------------------------",
         f"• *Status:* 🟢 Bot Active & Scanning",
         f"• *Total CoinDCX Pairs Scanned:* {last_markets_count}",
@@ -262,8 +280,7 @@ def send_4hour_heartbeat():
             )
 
     msg_lines.append("\n⚠️ *Keep an eye on these tokens as they approach your 0.50% entry zone!*")
-    full_msg = "\n".join(msg_lines)
-    send_telegram_alert(full_msg)
+    send_telegram_alert("\n".join(msg_lines))
 
 # ==========================================
 # BACKGROUND CONTINUOUS SCANNER THREAD
@@ -271,7 +288,15 @@ def send_4hour_heartbeat():
 def scanner_loop():
     global last_scan_time, last_markets_count, last_scan_duration, watchlist_tokens
 
-    time.sleep(10)  # Short initial start delay
+    # Send instant lightweight startup notification without blocking on a scan
+    startup_msg = (
+        "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
+        "• *Status:* 🟢 Online in Render Cloud\n"
+        "• *Scan Rate:* Every 90 seconds\n"
+        "• *Heartbeat Summary:* Every 2 hours"
+    )
+    send_telegram_alert(startup_msg)
+
     last_heartbeat_time = time.time()
 
     while True:
@@ -290,9 +315,9 @@ def scanner_loop():
             last_scan_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
             print(f"[Scan Complete] Scanned {last_markets_count} pairs in {round(last_scan_duration, 1)}s")
 
-            # Check if 4 hours (14,400 seconds) have elapsed to send Heartbeat
-            if time.time() - last_heartbeat_time >= 14400:
-                send_4hour_heartbeat()
+            # Check if 2 hours (7,200 seconds) have elapsed to send Heartbeat
+            if time.time() - last_heartbeat_time >= HEARTBEAT_INTERVAL:
+                send_2hour_heartbeat()
                 last_heartbeat_time = time.time()
 
             time.sleep(90)  # Wait 1.5 minutes before next full scan cycle
@@ -313,7 +338,7 @@ def home():
 def trigger_test():
     """Manual Diagnostic Link Endpoint."""
     threading.Thread(target=run_diagnostic_test).start()
-    return "<h1>🟢 Manual Diagnostic Test Triggered! Check your Telegram app.</h1>", 200
+    return "<h1>🟢 Manual Diagnostic Test Triggered! Check your Telegram app for the full report.</h1>", 200
 
 # ==========================================
 # APPLICATION ENTRYPOINT
