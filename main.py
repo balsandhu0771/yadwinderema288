@@ -129,7 +129,6 @@ def fetch_candles(pair: str, interval: str, limit: int = 350) -> pd.DataFrame:
 # SCANNER CORE LOGIC
 # ==========================================
 def process_market(pair: str, is_diagnostic: bool = False) -> dict:
-    """Evaluates a market pair and returns result status."""
     global watchlist_tokens
 
     df_1h = fetch_candles(pair, interval="1h")
@@ -148,9 +147,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
 
     dist_pct = abs(live_price - ema_1h) / ema_1h * 100
 
-    # ------------------------------------
-    # BEARISH SETUP EVALUATION
-    # ------------------------------------
+    # Bearish Setup
     if ema_30m >= (ema_1h * 0.9992):
         if check_bearish_divergence(df_1h):
             if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price >= ema_1h:
@@ -178,9 +175,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     watchlist_tokens.append(token_info)
                 return {"status": "near_miss", "info": token_info}
 
-    # ------------------------------------
-    # BULLISH SETUP EVALUATION
-    # ------------------------------------
+    # Bullish Setup
     if ema_30m <= (ema_1h * 1.0008):
         if check_bullish_divergence(df_1h):
             if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price <= ema_1h:
@@ -288,7 +283,7 @@ def send_2hour_heartbeat():
 def scanner_loop():
     global last_scan_time, last_markets_count, last_scan_duration, watchlist_tokens
 
-    # Send instant lightweight startup notification without blocking on a scan
+    # Send instant startup notification
     startup_msg = (
         "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
         "• *Status:* 🟢 Online in Render Cloud\n"
@@ -302,25 +297,24 @@ def scanner_loop():
     while True:
         try:
             start_time = time.time()
-            watchlist_tokens = []  # Reset near-miss watchlist for fresh cycle
+            watchlist_tokens = []
 
             markets = get_all_pairs()
             last_markets_count = len(markets)
 
             for pair in markets:
                 process_market(pair)
-                time.sleep(0.05)  # Micro-pause to prevent API rate limits
+                time.sleep(0.05)
 
             last_scan_duration = time.time() - start_time
             last_scan_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
             print(f"[Scan Complete] Scanned {last_markets_count} pairs in {round(last_scan_duration, 1)}s")
 
-            # Check if 2 hours (7,200 seconds) have elapsed to send Heartbeat
             if time.time() - last_heartbeat_time >= HEARTBEAT_INTERVAL:
                 send_2hour_heartbeat()
                 last_heartbeat_time = time.time()
 
-            time.sleep(90)  # Wait 1.5 minutes before next full scan cycle
+            time.sleep(90)
 
         except Exception as e:
             print(f"[Error in main scanner loop]: {e}")
@@ -331,23 +325,20 @@ def scanner_loop():
 # ==========================================
 @app.route('/')
 def home():
-    """UptimeRobot pings this root URL every 5 minutes to keep Render awake."""
     return f"🟢 CoinDCX Scanner Web Service Active! Last scan: {last_scan_time}", 200
 
 @app.route('/test')
 def trigger_test():
-    """Manual Diagnostic Link Endpoint."""
     threading.Thread(target=run_diagnostic_test).start()
     return "<h1>🟢 Manual Diagnostic Test Triggered! Check your Telegram app for the full report.</h1>", 200
 
 # ==========================================
-# APPLICATION ENTRYPOINT
+# START BACKGROUND SCANNER ON MODULE IMPORT
+# (Ensures Gunicorn triggers the background thread!)
 # ==========================================
-if __name__ == "__main__":
-    # Start Scanner Loop in an independent background thread
-    t = threading.Thread(target=scanner_loop, daemon=True)
-    t.start()
+scanner_thread = threading.Thread(target=scanner_loop, daemon=True)
+scanner_thread.start()
 
-    # Start Flask Web Server
+if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
     app.run(host="0.0.0.0", port=port)
