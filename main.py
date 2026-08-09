@@ -13,9 +13,11 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 EMA_PERIOD = 288
 RSI_PERIOD = 14
-PROXIMITY_PRIMARY_PCT = 0.5    # Entry zone (<= 0.5% or crossed)
-PROXIMITY_WATCHLIST_MIN = 0.51 # Near-miss zone start
-PROXIMITY_WATCHLIST_MAX = 1.50 # Near-miss zone end
+PROXIMITY_PRIMARY_PCT = 1.0    # Primary Entry zone (<= 1.0% or crossed)
+PROXIMITY_WATCHLIST_MIN = 1.01 # Near-miss zone start
+PROXIMITY_WATCHLIST_MAX = 3.00 # Near-miss zone end
+EMA_30M_TOLERANCE_PCT = 5.0    # 30M EMA alignment tolerance (5.0%)
+
 DIV_LOOKBACK_MIN = 15
 DIV_LOOKBACK_MAX = 30
 HEARTBEAT_INTERVAL = 7200      # 2 Hours in seconds
@@ -85,6 +87,7 @@ def check_bearish_divergence(df: pd.DataFrame) -> bool:
     past_price = df['high'].loc[past_max_idx]
     past_rsi = df['rsi'].loc[past_max_idx]
 
+    # Evaluates both subtle and major bearish divergences
     return (curr_price > past_price) and (curr_rsi < past_rsi)
 
 def check_bullish_divergence(df: pd.DataFrame) -> bool:
@@ -100,6 +103,7 @@ def check_bullish_divergence(df: pd.DataFrame) -> bool:
     past_price = df['low'].loc[past_min_idx]
     past_rsi = df['rsi'].loc[past_min_idx]
 
+    # Evaluates both subtle and major bullish divergences
     return (curr_price < past_price) and (curr_rsi > past_rsi)
 
 # ==========================================
@@ -153,13 +157,13 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
     # BEARISH SETUP EVALUATION
     # ------------------------------------
     if check_bearish_divergence(df_1h):
-        # 30M Alignment Check
-        is_30m_aligned = ema_30m >= (ema_1h * 0.9992)
+        # 30M Alignment Check with 5.0% tolerance
+        is_30m_aligned = ema_30m >= (ema_1h * (1 - EMA_30M_TOLERANCE_PCT / 100))
         
-        # Primary Entry Zone (<= 0.5% proximity or crossed above)
+        # Primary Entry Zone (<= 1.0% proximity or crossed above)
         if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price >= ema_1h:
             tier_badge = "⭐ *A+ BEARISH CONFLUENCE SETUP*" if is_30m_aligned else "⚡ *1H BEARISH PRIMARY SETUP (30M Extended)*"
-            status_note = "✅ Fully Aligned on 30M Timeframe" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% {'below' if ema_30m < ema_1h else 'above'} 1H EMA"
+            status_note = f"✅ 30M EMA within 5.0% tolerance ({round(ema_30m_diff_pct, 2)}%)" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% below 1H EMA"
 
             if not is_diagnostic:
                 msg = (
@@ -185,7 +189,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                 "dist": round(dist_pct, 2)
             }
 
-        # Near-Miss Watchlist Zone (0.51% to 1.50%)
+        # Near-Miss Watchlist Zone (1.01% to 3.00%)
         elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
             token_info = {
                 "pair": pair,
@@ -202,13 +206,13 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
     # BULLISH SETUP EVALUATION
     # ------------------------------------
     if check_bullish_divergence(df_1h):
-        # 30M Alignment Check
-        is_30m_aligned = ema_30m <= (ema_1h * 1.0008)
+        # 30M Alignment Check with 5.0% tolerance
+        is_30m_aligned = ema_30m <= (ema_1h * (1 + EMA_30M_TOLERANCE_PCT / 100))
 
-        # Primary Entry Zone (<= 0.5% proximity or crossed below)
+        # Primary Entry Zone (<= 1.0% proximity or crossed below)
         if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price <= ema_1h:
             tier_badge = "⭐ *A+ BULLISH CONFLUENCE SETUP*" if is_30m_aligned else "⚡ *1H BULLISH PRIMARY SETUP (30M Extended)*"
-            status_note = "✅ Fully Aligned on 30M Timeframe" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% {'above' if ema_30m > ema_1h else 'below'} 1H EMA"
+            status_note = f"✅ 30M EMA within 5.0% tolerance ({round(ema_30m_diff_pct, 2)}%)" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% above 1H EMA"
 
             if not is_diagnostic:
                 msg = (
@@ -234,7 +238,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                 "dist": round(dist_pct, 2)
             }
 
-        # Near-Miss Watchlist Zone (0.51% to 1.50%)
+        # Near-Miss Watchlist Zone (1.01% to 3.00%)
         elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
             token_info = {
                 "pair": pair,
@@ -276,19 +280,19 @@ def run_diagnostic_test():
         "------------------------------------",
         f"• *System Health:* 🟢 Alive & Operational",
         f"• *Total Markets Scanned:* {total_scanned}",
-        f"• *Primary Alerts Triggered:* {primary_alerts_found}",
-        f"• *Near-Miss Tokens Found:* {len(near_miss_list)}",
+        f"• *Primary Alerts Triggered (<= 1.0%):* {primary_alerts_found}",
+        f"• *Near-Miss Tokens Found (1.01% - 3.0%):* {len(near_miss_list)}",
         f"• *Scan Duration:* {round(duration, 1)}s",
         f"• *Timestamp:* {time_str}"
     ]
 
     if near_miss_list:
-        msg_lines.append("\n👀 *NEAR-MISS WATCHLIST (0.51% - 1.50%)*")
+        msg_lines.append("\n👀 *NEAR-MISS WATCHLIST (1.01% - 3.00%)*")
         msg_lines.append("------------------------------------")
         for t in near_miss_list:
             msg_lines.append(f"• {t['type']} *{t['pair']}* | Dist: {t['dist']}% | Price: {t['price']}")
     else:
-        msg_lines.append("\n• _No tokens currently sitting in the 0.51%-1.50% near-miss zone._")
+        msg_lines.append("\n• _No tokens currently sitting in the 1.01%-3.00% near-miss zone._")
 
     send_telegram_alert("\n".join(msg_lines))
 
@@ -306,12 +310,12 @@ def send_2hour_heartbeat():
         f"• *Primary Alerts Triggered (Last Scan):* {last_primary_alerts_count}",
         f"• *Scan Duration:* {round(last_scan_duration, 1)}s",
         f"• *Last Completed Scan:* {last_scan_time}",
-        "\n👀 *NEAR-MISS WATCHLIST (Proximity 0.51% - 1.50%)*",
+        "\n👀 *NEAR-MISS WATCHLIST (Proximity 1.01% - 3.00%)*",
         "------------------------------------"
     ]
 
     if not watchlist_tokens:
-        msg_lines.append("• _No near-miss tokens currently in the 0.51%-1.50% zone with RSI divergence._")
+        msg_lines.append("• _No near-miss tokens currently in the 1.01%-3.00% zone with RSI divergence._")
     else:
         for t in watchlist_tokens:
             msg_lines.append(
@@ -319,7 +323,7 @@ def send_2hour_heartbeat():
                 f"  - Distance: {t['dist']}% | Price: {t['price']} | 1H EMA: {t['ema_1h']}"
             )
 
-    msg_lines.append("\n⚠️ *Keep an eye on these tokens as they approach your 0.50% entry zone!*")
+    msg_lines.append("\n⚠️ *Keep an eye on these tokens as they approach your 1.00% entry zone!*")
     send_telegram_alert("\n".join(msg_lines))
 
 # ==========================================
@@ -332,9 +336,9 @@ def scanner_loop():
     startup_msg = (
         "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
         "• *Status:* 🟢 Online in Render Cloud\n"
-        "• *Scan Rate:* Continuous (~90s cycles)\n"
-        "• *Heartbeat Summary:* Every 2 hours\n"
-        "• *Tiering Mode:* Active (⭐ A+ Confluence / ⚡ 1H Primary)"
+        "• *Primary Entry Zone:* <= 1.0%\n"
+        "• *Near-Miss Watchlist:* 1.01% - 3.00%\n"
+        "• *30M EMA Tolerance:* 5.0%"
     )
     send_telegram_alert(startup_msg)
 
