@@ -30,6 +30,7 @@ app = Flask(__name__)
 last_scan_time = "Not started"
 last_markets_count = 0
 last_scan_duration = 0
+last_primary_alerts_count = 0
 watchlist_tokens = []
 
 # ==========================================
@@ -232,7 +233,7 @@ def run_diagnostic_test():
         "------------------------------------",
         f"• *System Health:* 🟢 Alive & Operational",
         f"• *Total Markets Scanned:* {total_scanned}",
-        f"• *Primary Alerts Active:* {primary_alerts_found}",
+        f"• *Primary Alerts Triggered:* {primary_alerts_found}",
         f"• *Near-Miss Tokens Found:* {len(near_miss_list)}",
         f"• *Scan Duration:* {round(duration, 1)}s",
         f"• *Timestamp:* {time_str}"
@@ -252,13 +253,14 @@ def run_diagnostic_test():
 # 2-HOUR HEARTBEAT & WATCHLIST COMPILER
 # ==========================================
 def send_2hour_heartbeat():
-    global watchlist_tokens
+    global watchlist_tokens, last_primary_alerts_count
     
     msg_lines = [
         "💓 *2-HOUR SYSTEM HEARTBEAT & WATCHLIST*",
         "------------------------------------",
         f"• *Status:* 🟢 Bot Active & Scanning",
         f"• *Total CoinDCX Pairs Scanned:* {last_markets_count}",
+        f"• *Primary Alerts Triggered (Last Scan):* {last_primary_alerts_count}",
         f"• *Scan Duration:* {round(last_scan_duration, 1)}s",
         f"• *Last Completed Scan:* {last_scan_time}",
         "\n👀 *NEAR-MISS WATCHLIST (Proximity 0.51% - 1.50%)*",
@@ -281,7 +283,7 @@ def send_2hour_heartbeat():
 # BACKGROUND CONTINUOUS SCANNER THREAD
 # ==========================================
 def scanner_loop():
-    global last_scan_time, last_markets_count, last_scan_duration, watchlist_tokens
+    global last_scan_time, last_markets_count, last_scan_duration, watchlist_tokens, last_primary_alerts_count
 
     # Send instant startup notification
     startup_msg = (
@@ -298,17 +300,21 @@ def scanner_loop():
         try:
             start_time = time.time()
             watchlist_tokens = []
+            current_cycle_primary_count = 0
 
             markets = get_all_pairs()
             last_markets_count = len(markets)
 
             for pair in markets:
-                process_market(pair)
+                res = process_market(pair)
+                if res and res.get("status") == "primary_alert":
+                    current_cycle_primary_count += 1
                 time.sleep(0.05)
 
+            last_primary_alerts_count = current_cycle_primary_count
             last_scan_duration = time.time() - start_time
             last_scan_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-            print(f"[Scan Complete] Scanned {last_markets_count} pairs in {round(last_scan_duration, 1)}s")
+            print(f"[Scan Complete] Scanned {last_markets_count} pairs in {round(last_scan_duration, 1)}s | Primary Alerts: {last_primary_alerts_count}")
 
             if time.time() - last_heartbeat_time >= HEARTBEAT_INTERVAL:
                 send_2hour_heartbeat()
@@ -334,7 +340,6 @@ def trigger_test():
 
 # ==========================================
 # START BACKGROUND SCANNER ON MODULE IMPORT
-# (Ensures Gunicorn triggers the background thread!)
 # ==========================================
 scanner_thread = threading.Thread(target=scanner_loop, daemon=True)
 scanner_thread.start()
