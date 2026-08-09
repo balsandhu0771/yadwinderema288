@@ -60,7 +60,7 @@ def send_telegram_alert(message: str):
                 requests.post(url, json=payload, timeout=10)
                 time.sleep(1)
             except Exception as e:
-                print(f"[Error] Telegram chunk alert failed: {e}")
+                print(f"[Error] Telegram chunk alert failed for part {idx+1}: {e}")
 
 # ==========================================
 # TECHNICAL ANALYSIS CALCULATIONS
@@ -147,62 +147,105 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
     ema_30m = df_30m.iloc[-1]['ema288']
 
     dist_pct = abs(live_price - ema_1h) / ema_1h * 100
+    ema_30m_diff_pct = (ema_30m - ema_1h) / ema_1h * 100
 
-    # Bearish Setup
-    if ema_30m >= (ema_1h * 0.9992):
-        if check_bearish_divergence(df_1h):
-            if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price >= ema_1h:
-                if not is_diagnostic:
-                    msg = (
-                        f"🔴 *PRIMARY BEARISH ALERT: {pair}*\n\n"
-                        f"• *Live Price:* {live_price}\n"
-                        f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
-                        f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
-                        f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
-                        f"• *Signal:* Bearish RSI Divergence (15–30 candles) active near 1H EMA!"
-                    )
-                    send_telegram_alert(msg)
-                return {"status": "primary_alert", "pair": pair, "type": "🔴 Bearish", "price": live_price, "ema_1h": round(ema_1h, 4), "dist": round(dist_pct, 2)}
+    # ------------------------------------
+    # BEARISH SETUP EVALUATION
+    # ------------------------------------
+    if check_bearish_divergence(df_1h):
+        # 30M Alignment Check
+        is_30m_aligned = ema_30m >= (ema_1h * 0.9992)
+        
+        # Primary Entry Zone (<= 0.5% proximity or crossed above)
+        if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price >= ema_1h:
+            tier_badge = "⭐ *A+ BEARISH CONFLUENCE SETUP*" if is_30m_aligned else "⚡ *1H BEARISH PRIMARY SETUP (30M Extended)*"
+            status_note = "✅ Fully Aligned on 30M Timeframe" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% {'below' if ema_30m < ema_1h else 'above'} 1H EMA"
 
-            elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
-                token_info = {
-                    "pair": pair,
-                    "type": "🔴 Bearish",
-                    "price": live_price,
-                    "ema_1h": round(ema_1h, 4),
-                    "dist": round(dist_pct, 2)
-                }
-                if not is_diagnostic:
-                    watchlist_tokens.append(token_info)
-                return {"status": "near_miss", "info": token_info}
+            if not is_diagnostic:
+                msg = (
+                    f"{tier_badge}\n"
+                    f"------------------------------------\n"
+                    f"• *Market:* {pair}\n"
+                    f"• *Live Price:* {live_price}\n"
+                    f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
+                    f"• *1H Signal:* Bearish RSI Divergence (15–30 candles)\n\n"
+                    f"📊 *TIMEFRAME CONFLUENCE:*\n"
+                    f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
+                    f"• *30M Status:* {status_note}"
+                )
+                send_telegram_alert(msg)
 
-    # Bullish Setup
-    if ema_30m <= (ema_1h * 1.0008):
-        if check_bullish_divergence(df_1h):
-            if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price <= ema_1h:
-                if not is_diagnostic:
-                    msg = (
-                        f"🟢 *PRIMARY BULLISH ALERT: {pair}*\n\n"
-                        f"• *Live Price:* {live_price}\n"
-                        f"• *1H 288 EMA:* {round(ema_1h, 4)}\n"
-                        f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
-                        f"• *Distance to EMA:* {round(dist_pct, 2)}%\n"
-                        f"• *Signal:* Bullish RSI Divergence (15–30 candles) active near 1H EMA!"
-                    )
-                    send_telegram_alert(msg)
-                return {"status": "primary_alert", "pair": pair, "type": "🟢 Bullish", "price": live_price, "ema_1h": round(ema_1h, 4), "dist": round(dist_pct, 2)}
+            return {
+                "status": "primary_alert",
+                "pair": pair,
+                "type": "🔴 Bearish",
+                "tier": "A+" if is_30m_aligned else "1H",
+                "price": live_price,
+                "ema_1h": round(ema_1h, 4),
+                "dist": round(dist_pct, 2)
+            }
 
-            elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
-                token_info = {
-                    "pair": pair,
-                    "type": "🟢 Bullish",
-                    "price": live_price,
-                    "ema_1h": round(ema_1h, 4),
-                    "dist": round(dist_pct, 2)
-                }
-                if not is_diagnostic:
-                    watchlist_tokens.append(token_info)
-                return {"status": "near_miss", "info": token_info}
+        # Near-Miss Watchlist Zone (0.51% to 1.50%)
+        elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
+            token_info = {
+                "pair": pair,
+                "type": "🔴 Bearish",
+                "price": live_price,
+                "ema_1h": round(ema_1h, 4),
+                "dist": round(dist_pct, 2)
+            }
+            if not is_diagnostic:
+                watchlist_tokens.append(token_info)
+            return {"status": "near_miss", "info": token_info}
+
+    # ------------------------------------
+    # BULLISH SETUP EVALUATION
+    # ------------------------------------
+    if check_bullish_divergence(df_1h):
+        # 30M Alignment Check
+        is_30m_aligned = ema_30m <= (ema_1h * 1.0008)
+
+        # Primary Entry Zone (<= 0.5% proximity or crossed below)
+        if dist_pct <= PROXIMITY_PRIMARY_PCT or live_price <= ema_1h:
+            tier_badge = "⭐ *A+ BULLISH CONFLUENCE SETUP*" if is_30m_aligned else "⚡ *1H BULLISH PRIMARY SETUP (30M Extended)*"
+            status_note = "✅ Fully Aligned on 30M Timeframe" if is_30m_aligned else f"⚠️ 30M EMA is {abs(round(ema_30m_diff_pct, 2))}% {'above' if ema_30m > ema_1h else 'below'} 1H EMA"
+
+            if not is_diagnostic:
+                msg = (
+                    f"{tier_badge}\n"
+                    f"------------------------------------\n"
+                    f"• *Market:* {pair}\n"
+                    f"• *Live Price:* {live_price}\n"
+                    f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
+                    f"• *1H Signal:* Bullish RSI Divergence (15–30 candles)\n\n"
+                    f"📊 *TIMEFRAME CONFLUENCE:*\n"
+                    f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
+                    f"• *30M Status:* {status_note}"
+                )
+                send_telegram_alert(msg)
+
+            return {
+                "status": "primary_alert",
+                "pair": pair,
+                "type": "🟢 Bullish",
+                "tier": "A+" if is_30m_aligned else "1H",
+                "price": live_price,
+                "ema_1h": round(ema_1h, 4),
+                "dist": round(dist_pct, 2)
+            }
+
+        # Near-Miss Watchlist Zone (0.51% to 1.50%)
+        elif PROXIMITY_WATCHLIST_MIN <= dist_pct <= PROXIMITY_WATCHLIST_MAX:
+            token_info = {
+                "pair": pair,
+                "type": "🟢 Bullish",
+                "price": live_price,
+                "ema_1h": round(ema_1h, 4),
+                "dist": round(dist_pct, 2)
+            }
+            if not is_diagnostic:
+                watchlist_tokens.append(token_info)
+            return {"status": "near_miss", "info": token_info}
 
     return {"status": "normal"}
 
@@ -289,8 +332,9 @@ def scanner_loop():
     startup_msg = (
         "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
         "• *Status:* 🟢 Online in Render Cloud\n"
-        "• *Scan Rate:* Every 90 seconds\n"
-        "• *Heartbeat Summary:* Every 2 hours"
+        "• *Scan Rate:* Continuous (~90s cycles)\n"
+        "• *Heartbeat Summary:* Every 2 hours\n"
+        "• *Tiering Mode:* Active (⭐ A+ Confluence / ⚡ 1H Primary)"
     )
     send_telegram_alert(startup_msg)
 
