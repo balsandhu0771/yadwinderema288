@@ -18,8 +18,8 @@ PROXIMITY_WATCHLIST_MIN = 1.01 # Near-miss zone start
 PROXIMITY_WATCHLIST_MAX = 3.00 # Near-miss zone end
 EMA_30M_TOLERANCE_PCT = 5.0    # 30M EMA alignment tolerance (5.0%)
 
-DIV_LOOKBACK_MIN = 15
-DIV_LOOKBACK_MAX = 30
+DIV_LOOKBACK_MIN = 5           # Expanded min lookback
+DIV_LOOKBACK_MAX = 40          # Expanded max lookback
 HEARTBEAT_INTERVAL = 7200      # 2 Hours in seconds
 
 COINDCX_PUBLIC_API = "https://public.coindcx.com"
@@ -87,7 +87,7 @@ def check_bearish_divergence(df: pd.DataFrame) -> bool:
     past_price = df['high'].loc[past_max_idx]
     past_rsi = df['rsi'].loc[past_max_idx]
 
-    # Evaluates both subtle and major bearish divergences
+    # Evaluates both subtle and major bearish divergences across 5-40 candles
     return (curr_price > past_price) and (curr_rsi < past_rsi)
 
 def check_bullish_divergence(df: pd.DataFrame) -> bool:
@@ -103,7 +103,7 @@ def check_bullish_divergence(df: pd.DataFrame) -> bool:
     past_price = df['low'].loc[past_min_idx]
     past_rsi = df['rsi'].loc[past_min_idx]
 
-    # Evaluates both subtle and major bullish divergences
+    # Evaluates both subtle and major bullish divergences across 5-40 candles
     return (curr_price < past_price) and (curr_rsi > past_rsi)
 
 # ==========================================
@@ -172,7 +172,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bearish RSI Divergence (15–30 candles)\n\n"
+                    f"• *1H Signal:* Bearish RSI Divergence (5–40 candles)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -221,7 +221,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bullish RSI Divergence (15–30 candles)\n\n"
+                    f"• *1H Signal:* Bullish RSI Divergence (5–40 candles)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -337,61 +337,4 @@ def scanner_loop():
         "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
         "• *Status:* 🟢 Online in Render Cloud\n"
         "• *Primary Entry Zone:* <= 1.0%\n"
-        "• *Near-Miss Watchlist:* 1.01% - 3.00%\n"
-        "• *30M EMA Tolerance:* 5.0%"
-    )
-    send_telegram_alert(startup_msg)
-
-    last_heartbeat_time = time.time()
-
-    while True:
-        try:
-            start_time = time.time()
-            watchlist_tokens = []
-            current_cycle_primary_count = 0
-
-            markets = get_all_pairs()
-            last_markets_count = len(markets)
-
-            for pair in markets:
-                res = process_market(pair)
-                if res and res.get("status") == "primary_alert":
-                    current_cycle_primary_count += 1
-                time.sleep(0.05)
-
-            last_primary_alerts_count = current_cycle_primary_count
-            last_scan_duration = time.time() - start_time
-            last_scan_time = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
-            print(f"[Scan Complete] Scanned {last_markets_count} pairs in {round(last_scan_duration, 1)}s | Primary Alerts: {last_primary_alerts_count}")
-
-            if time.time() - last_heartbeat_time >= HEARTBEAT_INTERVAL:
-                send_2hour_heartbeat()
-                last_heartbeat_time = time.time()
-
-            time.sleep(90)
-
-        except Exception as e:
-            print(f"[Error in main scanner loop]: {e}")
-            time.sleep(60)
-
-# ==========================================
-# FLASK ROUTES (KEEP-ALIVE & TEST LINK)
-# ==========================================
-@app.route('/')
-def home():
-    return f"🟢 CoinDCX Scanner Web Service Active! Last scan: {last_scan_time}", 200
-
-@app.route('/test')
-def trigger_test():
-    threading.Thread(target=run_diagnostic_test).start()
-    return "<h1>🟢 Manual Diagnostic Test Triggered! Check your Telegram app for the full report.</h1>", 200
-
-# ==========================================
-# START BACKGROUND SCANNER ON MODULE IMPORT
-# ==========================================
-scanner_thread = threading.Thread(target=scanner_loop, daemon=True)
-scanner_thread.start()
-
-if __name__ == "__main__":
-    port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port)
+        "• *Near-Miss Watchlist:* 1.01% - 3.00%\
