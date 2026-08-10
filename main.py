@@ -75,34 +75,52 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def check_bearish_divergence(df: pd.DataFrame) -> bool:
+    """Checks if current price forms a bearish divergence against ANY local fractal swing peak."""
     curr_idx = len(df) - 1
     curr_price = df['high'].iloc[curr_idx]
     curr_rsi = df['rsi'].iloc[curr_idx]
 
-    lookback_df = df.iloc[max(0, curr_idx - DIV_LOOKBACK_MAX) : max(0, curr_idx - DIV_LOOKBACK_MIN)]
-    if lookback_df.empty:
-        return False
+    start_idx = max(1, curr_idx - DIV_LOOKBACK_MAX)
+    end_idx = max(1, curr_idx - DIV_LOOKBACK_MIN)
 
-    past_max_idx = lookback_df['high'].idxmax()
-    past_price = df['high'].loc[past_max_idx]
-    past_rsi = df['rsi'].loc[past_max_idx]
+    # Search for all fractal swing peaks (local highs) within the lookback window
+    for i in range(start_idx, end_idx):
+        past_price = df['high'].iloc[i]
+        past_rsi = df['rsi'].iloc[i]
 
-    return (curr_price > past_price) and (curr_rsi < past_rsi)
+        # Fractal check: candle high must be higher or equal to immediate neighbors
+        is_fractal_peak = (past_price >= df['high'].iloc[i - 1]) and (past_price >= df['high'].iloc[i + 1])
+
+        if is_fractal_peak:
+            # Bearish Divergence: Price higher high + RSI lower high
+            if (curr_price > past_price) and (curr_rsi < past_rsi):
+                return True
+
+    return False
 
 def check_bullish_divergence(df: pd.DataFrame) -> bool:
+    """Checks if current price forms a bullish divergence against ANY local fractal swing trough."""
     curr_idx = len(df) - 1
     curr_price = df['low'].iloc[curr_idx]
     curr_rsi = df['rsi'].iloc[curr_idx]
 
-    lookback_df = df.iloc[max(0, curr_idx - DIV_LOOKBACK_MAX) : max(0, curr_idx - DIV_LOOKBACK_MIN)]
-    if lookback_df.empty:
-        return False
+    start_idx = max(1, curr_idx - DIV_LOOKBACK_MAX)
+    end_idx = max(1, curr_idx - DIV_LOOKBACK_MIN)
 
-    past_min_idx = lookback_df['low'].idxmin()
-    past_price = df['low'].loc[past_min_idx]
-    past_rsi = df['rsi'].loc[past_min_idx]
+    # Search for all fractal swing troughs (local lows) within the lookback window
+    for i in range(start_idx, end_idx):
+        past_price = df['low'].iloc[i]
+        past_rsi = df['rsi'].iloc[i]
 
-    return (curr_price < past_price) and (curr_rsi > past_rsi)
+        # Fractal check: candle low must be lower or equal to immediate neighbors
+        is_fractal_trough = (past_price <= df['low'].iloc[i - 1]) and (past_price <= df['low'].iloc[i + 1])
+
+        if is_fractal_trough:
+            # Bullish Divergence: Price lower low + RSI higher low
+            if (curr_price < past_price) and (curr_rsi > past_rsi):
+                return True
+
+    return False
 
 # ==========================================
 # COINDCX API DATA FETCHERS WITH RETRIES
@@ -153,7 +171,9 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
     dist_pct = abs(live_price - ema_1h) / ema_1h * 100
     ema_30m_diff_pct = (ema_30m - ema_1h) / ema_1h * 100
 
-    # Bearish Setup
+    # ------------------------------------
+    # BEARISH SETUP EVALUATION
+    # ------------------------------------
     if check_bearish_divergence(df_1h):
         is_30m_aligned = ema_30m >= (ema_1h * (1 - EMA_30M_TOLERANCE_PCT / 100))
         
@@ -168,7 +188,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bearish RSI Divergence (5–40 candles)\n\n"
+                    f"• *1H Signal:* Bearish RSI Divergence (Fractal Peak)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -197,7 +217,9 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                 watchlist_tokens.append(token_info)
             return {"status": "near_miss", "info": token_info}
 
-    # Bullish Setup
+    # ------------------------------------
+    # BULLISH SETUP EVALUATION
+    # ------------------------------------
     if check_bullish_divergence(df_1h):
         is_30m_aligned = ema_30m <= (ema_1h * (1 + EMA_30M_TOLERANCE_PCT / 100))
 
@@ -212,7 +234,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bullish RSI Divergence (5–40 candles)\n\n"
+                    f"• *1H Signal:* Bullish RSI Divergence (Fractal Trough)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -244,7 +266,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
     return {"status": "normal"}
 
 # ==========================================
-# DIAGNOSTIC MANUAL TEST RUNNER
+# DIAGNOSTIC MANUAL TEST RUNNER (VIA /test URL)
 # ==========================================
 def run_diagnostic_test():
     start_time = time.time()
@@ -326,7 +348,7 @@ def scanner_loop():
         "• *Status:* 🟢 Online in Render Cloud\n"
         "• *Primary Entry Zone:* <= 5.0%\n"
         "• *Near-Miss Watchlist:* 5.01% - 7.00%\n"
-        "• *RSI Div Lookback:* 5–40 Candles\n"
+        "• *Divergence Logic:* Fractal Peak Detection (5–40 Candles)\n"
         "• *30M EMA Tolerance:* 5.0%"
     )
     send_telegram_alert(startup_msg)
@@ -384,7 +406,7 @@ def trigger_test():
     threading.Thread(target=run_diagnostic_test).start()
     return "<h1>🟢 Manual Diagnostic Test Triggered! Check your Telegram app for the full report.</h1>", 200
 
-# Start background thread automatically on WSGI boot
+# Start background thread automatically
 start_scanner_once()
 
 if __name__ == "__main__":
