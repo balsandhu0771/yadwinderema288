@@ -14,17 +14,18 @@ TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 EMA_PERIOD = 288
 RSI_PERIOD = 14
 
-# Ultra-Sensitive Proximity Bands
-PROXIMITY_PRIMARY_PCT = 10.0    # Primary Entry zone (<= 10.0% or crossed)
-PROXIMITY_WATCHLIST_MIN = 10.01 # Near-miss zone start
-PROXIMITY_WATCHLIST_MAX = 15.00 # Near-miss zone end
-EMA_30M_TOLERANCE_PCT = 5.0     # 30M EMA alignment tolerance (5.0%)
+# Proximity Bands
+PROXIMITY_PRIMARY_PCT = 5.0    # Primary Entry zone (<= 5.0% or crossed)
+PROXIMITY_WATCHLIST_MIN = 5.01 # Near-miss zone start
+PROXIMITY_WATCHLIST_MAX = 10.00# Near-miss zone end
+EMA_30M_TOLERANCE_PCT = 5.0    # 30M EMA alignment tolerance (5.0%)
 
-DIV_LOOKBACK_MIN = 5            # Min lookback candles (~5 hours)
-DIV_LOOKBACK_MAX = 60           # Expanded max lookback candles (~2.5 days)
-MIN_RSI_DIFF = 0.5              # Ultra-sensitive RSI delta threshold
-MIN_CANDLES_REQUIRED = 100      # Include newer tokens
-HEARTBEAT_INTERVAL = 7200       # 2 Hours in seconds
+# Lookback Window: From immediate candle (1 hour back) up to 40 hours back
+DIV_LOOKBACK_MIN = 1           # Evaluates right from recent/current candle
+DIV_LOOKBACK_MAX = 40          # Evaluates up to 40 hours back
+MIN_RSI_DIFF = 0.5             # Ultra-sensitive RSI delta threshold
+MIN_CANDLES_REQUIRED = 100     # Reduced candle count threshold to include newer pairs
+HEARTBEAT_INTERVAL = 7200      # 2 Hours in seconds
 
 COINDCX_PUBLIC_API = "https://public.coindcx.com"
 COINDCX_TICKER_API = "https://api.coindcx.com/exchange/ticker"
@@ -78,7 +79,7 @@ def calculate_rsi(series: pd.Series, period: int = 14) -> pd.Series:
     return 100 - (100 / (1 + rs))
 
 def check_bearish_divergence(df: pd.DataFrame) -> bool:
-    """Ultra-sensitive Bearish Divergence check against any prior candle in 5-60 lookback."""
+    """Evaluates Bearish Divergence from live candle against past 1-40 candles."""
     curr_idx = len(df) - 1
     curr_price = df['high'].iloc[curr_idx]
     curr_rsi = df['rsi'].iloc[curr_idx]
@@ -90,14 +91,13 @@ def check_bearish_divergence(df: pd.DataFrame) -> bool:
         past_price = df['high'].iloc[i]
         past_rsi = df['rsi'].iloc[i]
 
-        # Triggers if price is higher than past candle but RSI is lower by >= 0.5 points
         if (curr_price > past_price) and ((past_rsi - curr_rsi) >= MIN_RSI_DIFF):
             return True
 
     return False
 
 def check_bullish_divergence(df: pd.DataFrame) -> bool:
-    """Ultra-sensitive Bullish Divergence check against any prior candle in 5-60 lookback."""
+    """Evaluates Bullish Divergence from live candle against past 1-40 candles."""
     curr_idx = len(df) - 1
     curr_price = df['low'].iloc[curr_idx]
     curr_rsi = df['rsi'].iloc[curr_idx]
@@ -109,36 +109,49 @@ def check_bullish_divergence(df: pd.DataFrame) -> bool:
         past_price = df['low'].iloc[i]
         past_rsi = df['rsi'].iloc[i]
 
-        # Triggers if price is lower than past candle but RSI is higher by >= 0.5 points
         if (curr_price < past_price) and ((curr_rsi - past_rsi) >= MIN_RSI_DIFF):
             return True
 
     return False
 
 # ==========================================
-# COINDCX API DATA FETCHERS WITH RETRIES
+# COINDCX API DATA FETCHERS WITH SYMBOL FALLBACKS
 # ==========================================
 def get_all_pairs() -> list:
+    """Fetches all active markets directly from CoinDCX live ticker API."""
     try:
         res = requests.get(COINDCX_TICKER_API, timeout=10)
         if res.status_code == 200:
-            return [item['market'] for item in res.json() if 'market' in item]
+            markets = [item['market'] for item in res.json() if 'market' in item]
+            return list(set(markets))
     except Exception as e:
-        print(f"[Error] Fetching markets: {e}")
+        print(f"[Error] Fetching markets list: {e}")
     return []
 
-def fetch_candles(pair: str, interval: str, limit: int = 350, retries: int = 2) -> pd.DataFrame:
+def fetch_candles(pair: str, interval: str, limit: int = 350) -> pd.DataFrame:
+    """Fetches candle data with symbol format fallbacks (e.g., B-PAXG_USDT vs PAXGUSDT)."""
     url = f"{COINDCX_PUBLIC_API}/market_data/candles"
-    for attempt in range(retries):
-        try:
-            res = requests.get(url, params={"pair": pair, "interval": interval, "limit": limit}, timeout=10)
-            if res.status_code == 200 and len(res.json()) > 0:
-                df = pd.DataFrame(res.json())
-                df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
-                return df.iloc[::-1].reset_index(drop=True)
-        except Exception:
-            pass
-        time.sleep(0.1)
+    
+    # Generate list of possible symbol variants for robustness
+    symbol_variants = [pair]
+    if pair.startswith("B-"):
+        symbol_variants.append(pair[2:])
+    elif "_" not in pair and pair.endswith("USDT"):
+        symbol_variants.append(f"B-{pair[:-4]}_USDT")
+        symbol_variants.append(f"{pair[:-4]}_USDT")
+
+    for symbol in symbol_variants:
+        for attempt in range(2):
+            try:
+                res = requests.get(url, params={"pair": symbol, "interval": interval, "limit": limit}, timeout=8)
+                if res.status_code == 200 and len(res.json()) > 0:
+                    df = pd.DataFrame(res.json())
+                    df[['open', 'high', 'low', 'close']] = df[['open', 'high', 'low', 'close']].apply(pd.to_numeric)
+                    return df.iloc[::-1].reset_index(drop=True)
+            except Exception:
+                pass
+            time.sleep(0.05)
+
     return pd.DataFrame()
 
 # ==========================================
@@ -181,7 +194,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bearish RSI Divergence (Ultra-Sensitive)\n\n"
+                    f"• *1H Signal:* Bearish RSI Divergence (1–40 candles)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -227,7 +240,7 @@ def process_market(pair: str, is_diagnostic: bool = False) -> dict:
                     f"• *Market:* {pair}\n"
                     f"• *Live Price:* {live_price}\n"
                     f"• *1H 288 EMA:* {round(ema_1h, 4)} (Dist: {round(dist_pct, 2)}%)\n"
-                    f"• *1H Signal:* Bullish RSI Divergence (Ultra-Sensitive)\n\n"
+                    f"• *1H Signal:* Bullish RSI Divergence (1–40 candles)\n\n"
                     f"📊 *TIMEFRAME CONFLUENCE:*\n"
                     f"• *30M 288 EMA:* {round(ema_30m, 4)}\n"
                     f"• *30M Status:* {status_note}"
@@ -274,7 +287,7 @@ def run_diagnostic_test():
             primary_alerts_found += 1
         elif res["status"] == "near_miss":
             near_miss_list.append(res["info"])
-        time.sleep(0.05)
+        time.sleep(0.04)
 
     duration = time.time() - start_time
     time_str = time.strftime("%Y-%m-%d %H:%M:%S UTC", time.gmtime())
@@ -284,19 +297,19 @@ def run_diagnostic_test():
         "------------------------------------",
         f"• *System Health:* 🟢 Alive & Operational",
         f"• *Total Markets Scanned:* {total_scanned}",
-        f"• *Primary Alerts Triggered (<= 10.0%):* {primary_alerts_found}",
-        f"• *Near-Miss Tokens Found (10.01% - 15.0%):* {len(near_miss_list)}",
+        f"• *Primary Alerts Triggered (<= 5.0%):* {primary_alerts_found}",
+        f"• *Near-Miss Tokens Found (5.01% - 10.0%):* {len(near_miss_list)}",
         f"• *Scan Duration:* {round(duration, 1)}s",
         f"• *Timestamp:* {time_str}"
     ]
 
     if near_miss_list:
-        msg_lines.append("\n👀 *NEAR-MISS WATCHLIST (10.01% - 15.00%)*")
+        msg_lines.append("\n👀 *NEAR-MISS WATCHLIST (5.01% - 10.00%)*")
         msg_lines.append("------------------------------------")
         for t in near_miss_list:
             msg_lines.append(f"• {t['type']} *{t['pair']}* | Dist: {t['dist']}% | Price: {t['price']}")
     else:
-        msg_lines.append("\n• _No tokens currently sitting in the 10.01%-15.00% near-miss zone._")
+        msg_lines.append("\n• _No tokens currently sitting in the 5.01%-10.00% near-miss zone._")
 
     send_telegram_alert("\n".join(msg_lines))
 
@@ -314,12 +327,12 @@ def send_2hour_heartbeat():
         f"• *Primary Alerts Triggered (Last Scan):* {last_primary_alerts_count}",
         f"• *Scan Duration:* {round(last_scan_duration, 1)}s",
         f"• *Last Completed Scan:* {last_scan_time}",
-        "\n👀 *NEAR-MISS WATCHLIST (Proximity 10.01% - 15.00%)*",
+        "\n👀 *NEAR-MISS WATCHLIST (Proximity 5.01% - 10.00%)*",
         "------------------------------------"
     ]
 
     if not watchlist_tokens:
-        msg_lines.append("• _No near-miss tokens currently in the 10.01%-15.00% zone with RSI divergence._")
+        msg_lines.append("• _No near-miss tokens currently in the 5.01%-10.00% zone with RSI divergence._")
     else:
         for t in watchlist_tokens:
             msg_lines.append(
@@ -327,7 +340,7 @@ def send_2hour_heartbeat():
                 f"  - Distance: {t['dist']}% | Price: {t['price']} | 1H EMA: {t['ema_1h']}"
             )
 
-    msg_lines.append("\n⚠️ *Keep an eye on these tokens as they approach your 10.00% entry zone!*")
+    msg_lines.append("\n⚠️ *Keep an eye on these tokens as they approach your 5.00% entry zone!*")
     send_telegram_alert("\n".join(msg_lines))
 
 # ==========================================
@@ -339,9 +352,9 @@ def scanner_loop():
     startup_msg = (
         "🚀 *CoinDCX Scanner Bot Started & Active!*\n\n"
         "• *Status:* 🟢 Online in Render Cloud\n"
-        "• *Primary Entry Zone:* <= 10.0%\n"
-        "• *Near-Miss Watchlist:* 10.01% - 15.00%\n"
-        "• *Divergence Logic:* Ultra-Sensitive (5–60 Candles, >=0.5 RSI diff)\n"
+        "• *Primary Entry Zone:* <= 5.0%\n"
+        "• *Near-Miss Watchlist:* 5.01% - 10.00%\n"
+        "• *Divergence Window:* 1–40 Candles (Recent Candle Inclusive)\n"
         "• *30M EMA Tolerance:* 5.0%"
     )
     send_telegram_alert(startup_msg)
@@ -361,7 +374,7 @@ def scanner_loop():
                 res = process_market(pair)
                 if res and res.get("status") == "primary_alert":
                     current_cycle_primary_count += 1
-                time.sleep(0.05)
+                time.sleep(0.04)
 
             last_primary_alerts_count = current_cycle_primary_count
             last_scan_duration = time.time() - start_time
